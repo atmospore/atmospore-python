@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import re
 
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 
 from atmospore import (
     APIError,
     AtmosporeClient,
+    AtmosporeError,
     AuthenticationError,
     DailyPollen,
     RateLimitError,
@@ -266,6 +268,59 @@ async def test_malformed_json_raises_api_error():
 
 
 # --- Risk level normalisation -------------------------------------------
+
+
+async def test_pollen_area_with_species_filter():
+    """When `species` is passed it's joined into the query string."""
+    payload = {"meta": {"units": "grains/m³"}, "data": []}
+    with aioresponses() as m:
+        m.get(re.compile(r".*/pollen-area\?.*"), payload=payload)
+        async with AtmosporeClient(api_key="ak_test") as c:
+            await c.pollen_area(lat=0, lon=0, species=["birch", "oak"])
+        # aioresponses stores the URLs that were called — verify our species got serialised.
+        called = list(m.requests.values())[0][0]
+        assert "species=birch%2Coak" in str(called.kwargs["params"]) or \
+            called.kwargs["params"].get("species") == "birch,oak"
+
+
+async def test_request_lazily_creates_session_outside_context_manager():
+    """Calling a method without `async with` triggers lazy session creation."""
+    payload = {"data": []}
+    client = AtmosporeClient(api_key="ak_test")
+    try:
+        with aioresponses() as m:
+            m.get(re.compile(r".*/pollen\?.*"), payload=payload)
+            days = await client.pollen(lat=0, lon=0)
+        assert days == []
+        assert client._session is not None
+    finally:
+        await client.close()
+
+
+async def test_429_with_unparseable_body_still_raises_rate_limit():
+    """If the 429 body isn't valid JSON, the client falls back to a default error message."""
+    with aioresponses() as m:
+        m.get(re.compile(r".*/pollen\?.*"), status=429, body="not json at all")
+        async with AtmosporeClient(api_key="ak_test") as c:
+            with pytest.raises(RateLimitError) as excinfo:
+                await c.pollen(lat=0, lon=0)
+    # No metadata fields populated when the body is unparseable.
+    assert excinfo.value.limit is None
+    assert excinfo.value.used is None
+    assert excinfo.value.resets_at is None
+
+
+async def test_network_error_retries_then_raises_atmospore_error():
+    """aiohttp.ClientError on every attempt eventually raises AtmosporeError('Network error')."""
+    with aioresponses() as m:
+        for _ in range(4):  # retries=3 → 4 total attempts
+            m.get(
+                re.compile(r".*/pollen\?.*"),
+                exception=aiohttp.ClientConnectionError("connection refused"),
+            )
+        async with AtmosporeClient(api_key="ak_test", retries=3) as c:
+            with pytest.raises(AtmosporeError, match="Network error"):
+                await c.pollen(lat=0, lon=0)
 
 
 @pytest.mark.parametrize(

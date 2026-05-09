@@ -247,10 +247,13 @@ class AtmosporeClient:
                     continue
                 raise last_error from e
 
-        # Defensive — shouldn't reach here.
-        if last_error:
+        # Defensive — shouldn't reach here. Every code path above either returns
+        # or raises before falling out of the loop.
+        if last_error:  # pragma: no cover
             raise last_error
-        raise AtmosporeError("Request failed after retries with no captured error")
+        raise AtmosporeError(  # pragma: no cover
+            "Request failed after retries with no captured error"
+        )
 
 
 def _backoff(attempt: int) -> float:
